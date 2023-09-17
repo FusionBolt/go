@@ -499,7 +499,7 @@ func looprotatetest(f *Func) {
 // licm stands for Loop Invariant Code Motion, it hoists expressions that computes
 // the same value outside loop
 func licm(f *Func) {
-	// if f.Name != "(*huffmanEncoder).bitCounts" {
+	// if f.Name != "Lookup" {
 	// 	return
 	// }
 
@@ -524,7 +524,13 @@ func licm(f *Func) {
 		lcssa[loop] = f.BuildLoopCloseForm(loopnest, loop)
 	}
 	for _, loop := range loopnest.loops {
-		if yes := lcssa[loop]; !yes {
+		yes := lcssa[loop]
+		fmt.Printf("==Loop%v %v\n", yes, loop)
+		if loop != nil {
+			continue
+		}
+
+		if loop != nil {
 			continue
 		}
 		// Rotate the loop, it creates a home for hoistable Values

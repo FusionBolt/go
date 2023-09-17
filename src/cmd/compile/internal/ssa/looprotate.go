@@ -153,6 +153,56 @@ import "fmt"
 //     * Update cond to use updated Phi as arguments.
 //     * Update uses of Values defined in loop header as loop header no longer
 //     dominates the loop exit
+
+// v4 = Phi
+// ...
+// v2 = Add v4, v5
+// v1 = Add v2, v3
+// If v1-> loop exit, loop ex
+func isTrivialLoopDef(sdom SparseTree, loopHeader *Block, val *Value, depth int) bool {
+	if depth >= 5 {
+		return false
+	}
+
+	if !isSpeculativeValue(val) {
+		return false
+	}
+	if val.Op == OpPhi && sdom.IsAncestorEq(val.Block, loopHeader) {
+		return true
+	}
+	for _, arg := range val.Args {
+		if !isTrivialLoopDef(sdom, loopHeader, arg, depth+1) {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneTrivialLoopDef(fn *Func, block *Block, sdom SparseTree, loop *loop, val *Value) *Value {
+	if val.Block != loop.header && val.Block != loop.latch {
+		assert(sdom.isAncestor(val.Block, loop.header), "sanity check")
+		return val
+	}
+	if val.Op == OpPhi {
+		for idx, pred := range val.Block.Preds {
+			if sdom.isAncestor(pred.b, loop.header) {
+				return val.Args[idx]
+			}
+		}
+		panic("NONONO")
+	}
+	clone := fn.newValueNoBlock(val.Op, val.Type, val.Pos)
+	clone.AuxInt = val.AuxInt
+	clone.Aux = val.Aux
+	args := make([]*Value, len(val.Args))
+	for i := 0; i < len(val.Args); i++ {
+		args[i] = cloneTrivialLoopDef(fn, block, sdom, loop, val.Args[i])
+	}
+	clone.AddArgs(args...)
+	block.placeValue(clone)
+	return clone
+}
+
 func (loop *loop) buildLoopForm(fn *Func) string {
 	loopHeader := loop.header
 	// loopHeader <- entry(0), loopLatch(1)?
@@ -179,6 +229,7 @@ func (loop *loop) buildLoopForm(fn *Func) string {
 
 	loop.exit = loopExit
 	loop.latch = loopHeader.Preds[1].b
+	sdom := fn.Sdom()
 
 	if len(loopExit.Preds) != 1 {
 		return "loop exit requries 1 predecessor"
@@ -191,7 +242,7 @@ func (loop *loop) buildLoopForm(fn *Func) string {
 			}
 			// Loop header may not dominate all loop exist, given up for these
 			// exotic guys
-			if !fn.Sdom().IsAncestorEq(loopHeader, exit) {
+			if !sdom.IsAncestorEq(loopHeader, exit) {
 				return "loop exit is not dominated by header"
 			}
 		}
@@ -211,6 +262,7 @@ func (loop *loop) buildLoopForm(fn *Func) string {
 	for _, val := range loop.exit.Values {
 		if isLoopClosePhi(val) {
 			if len(val.Args) > 0 && val.Args[0].Op != OpPhi {
+				fmt.Printf("==XX1 %v\n", isTrivialLoopDef(sdom, loopHeader, val.Args[0], 0))
 				return "use other phi"
 			}
 		}
@@ -218,6 +270,7 @@ func (loop *loop) buildLoopForm(fn *Func) string {
 	for _, ctrl := range loop.header.ControlValues() {
 		for _, arg := range ctrl.Args {
 			if arg.Block == loop.header && arg.Op != OpPhi {
+				fmt.Printf("==XX2 %v\n", isTrivialLoopDef(sdom, loopHeader, arg, 0))
 				return "cond relies not phi"
 			}
 		}
@@ -385,21 +438,22 @@ func (loop *loop) createLoopGuard(fn *Func, cond *Value, exitIdx int) {
 		// Normal case, clone conditional test
 		//	  If (Less v1 Phi(v2 v3)) -> loop body, loop exit
 		// => If (Less v1 v2)         -> loop header, loop exit
-		guardCond = loopGuard.NewValue0IA(cond.Pos, cond.Op, cond.Type, cond.AuxInt, cond.Aux)
-		newArgs := make([]*Value, 0, len(cond.Args))
-		for _, arg := range cond.Args {
-			newArg := arg
-			// Dont use Phi, use its incoming value instead, otherwise we will
-			// lose one update
-			if arg.Block == loop.header && arg.Op == OpPhi {
-				newArg = arg.Args[0]
-			}
-			if !sdom.IsAncestorEq(newArg.Block, cond.Block) {
-				panic("new argument of guard cond must dominate old cond")
-			}
-			newArgs = append(newArgs, newArg)
-		}
-		guardCond.AddArgs(newArgs...)
+		// guardCond = loopGuard.NewValue0IA(cond.Pos, cond.Op, cond.Type, cond.AuxInt, cond.Aux)
+		// newArgs := make([]*Value, 0, len(cond.Args))
+		// for _, arg := range cond.Args {
+		// 	newArg := arg
+		// 	// Dont use Phi, use its incoming value instead, otherwise we will
+		// 	// lose one update
+		// 	if arg.Block == loop.header && arg.Op == OpPhi {
+		// 		newArg = arg.Args[0]
+		// 	}
+		// 	if !sdom.IsAncestorEq(newArg.Block, cond.Block) {
+		// 		panic("new argument of guard cond must dominate old cond")
+		// 	}
+		// 	newArgs = append(newArgs, newArg)
+		// }
+		// guardCond.AddArgs(newArgs...)
+		guardCond = cloneTrivialLoopDef(fn, loopGuard, sdom, loop, cond)
 	} else {
 		// Rare case
 		//	   If (Phi v1 v2) -> loop body, loop exit
